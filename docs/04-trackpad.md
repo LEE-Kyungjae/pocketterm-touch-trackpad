@@ -61,13 +61,16 @@ journalctl -u pocketterm-trackpad.service -f
 | `TAP_MAX_MS` | 이 시간 안에 떼면 탭 후보 | `200` |
 | `TAP_SLOP_PX` | 이 픽셀 넘게 움직이면 탭 아님 | `12` |
 | `DRAG_START_MS` | 탭 직후 이 시간 안에 다시 누르면 드래그 | `300` |
+| `SCROLL_INERTIA` | 2손가락 스크롤 후 관성 on/off | `True` |
+| `SCROLL_FRICTION` | 관성 감쇠(16ms당 배율, 작을수록 빨리 멈춤) | `0.92` |
+| `SCROLL_INERTIA_MIN` | 이 속도(units/sec) 아래면 관성 정지 | `30` |
 
 ## 알려진 한계 / 앞으로
 
 - 멀티터치 **Type B**(ABS_MT_SLOT) 와 단일터치(ST, BTN_TOUCH+ABS_X/Y) 를 지원.
   그 외 특이한 프로토콜은 `--debug` 로 이벤트 보고 분기 추가 필요.
 - 스크롤 방향(자연/역방향)은 `SCROLL_SPEED` 부호로 조정.
-- 우클릭 = **두 손가락 탭**(구현됨). 관성 스크롤은 아직 없음 — 필요하면 추가.
+- 우클릭 = **두 손가락 탭**(구현됨). 관성 스크롤도 구현됨(놓아도 잠깐 흐르다 감속).
 
 ## 권한을 root 대신 좁히려면 (선택)
 

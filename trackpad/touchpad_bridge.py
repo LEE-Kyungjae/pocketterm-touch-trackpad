@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import select
 import time
 from typing import Dict, Optional
 
@@ -46,6 +47,10 @@ SCROLL_SPEED = 0.05      # 2손가락 스크롤 배율(움직인 픽셀 -> 휠 �
 TAP_MAX_MS = 200         # 이 시간 안에 떼면 탭 후보
 TAP_SLOP_PX = 12         # 이 픽셀 이상 움직이면 탭이 아니라 이동으로 간주
 DRAG_START_MS = 300      # 탭 직후 이 시간 안에 다시 누르면 드래그 시작
+SCROLL_INERTIA = True    # 2손가락 스크롤 후 관성(놓아도 잠깐 계속 흐름)
+SCROLL_FRICTION = 0.92   # 관성 감쇠(16ms당 배율, 작을수록 빨리 멈춤)
+SCROLL_INERTIA_MIN = 30  # 이 속도(units/sec) 아래로 떨어지면 관성 정지
+INERTIA_TICK = 0.012     # 관성 갱신 주기(초)
 
 
 def find_touch_device(explicit: Optional[str]) -> InputDevice:
@@ -127,19 +132,6 @@ def run(dev: InputDevice, debug: bool = False) -> None:
     print("[trackpad] Ctrl-C 로 종료")
 
     slots: Dict[int, Slot] = {}
-    cur_slot = 0
-
-    # 현재 리포트 프레임에서의 primary 손가락 좌표 갱신 추적
-    last_primary = None            # (x, y) 직전 프레임 primary 위치
-    prev_finger_count = 0
-
-    # 탭/드래그 상태
-    touch_down_ms = 0.0
-    touch_moved = 0.0              # 눌린 뒤 이동 누적 거리
-    last_up_ms = 0.0              # 마지막으로 손 뗀 시각(드래그 판정용)
-    max_fingers = 0               # 이번 터치 시퀀스에서 동시에 닿은 최대 손가락 수
-    dragging = False
-    left_down = False
 
     def slot(i: int) -> Slot:
         s = slots.get(i)
@@ -157,113 +149,180 @@ def run(dev: InputDevice, debug: bool = False) -> None:
         ui.write(ecodes.EV_KEY, button, 0)
         ui.syn()
 
-    try:
-        for ev in dev.read_loop():
-            if ev.type == ecodes.EV_ABS:
-                if ev.code == ecodes.ABS_MT_SLOT:
-                    cur_slot = ev.value
-                elif ev.code == ecodes.ABS_MT_TRACKING_ID:
-                    s = slot(cur_slot)
-                    s.active = ev.value != -1
-                elif ev.code == ecodes.ABS_MT_POSITION_X:
-                    slot(cur_slot).x = ev.value
-                elif ev.code == ecodes.ABS_MT_POSITION_Y:
-                    slot(cur_slot).y = ev.value
-                # 단일터치(ST) 전용 장치 대비: ABS_X/ABS_Y 를 slot 0 에 매핑
-                elif ev.code == ecodes.ABS_X:
-                    slot(0).x = ev.value
-                elif ev.code == ecodes.ABS_Y:
-                    slot(0).y = ev.value
+    # 스크롤 누적기: 소수 휠을 모아 정수 클릭으로 변환(매프레임 반올림 손실 방지)
+    scroll_acc = [0.0, 0.0]   # [vertical, horizontal]
 
-            elif ev.type == ecodes.EV_KEY and ev.code == ecodes.BTN_TOUCH:
-                # ST 장치는 slot 0 활성 상태를 BTN_TOUCH 로 알린다.
-                if not slots or list(slots.keys()) == [0]:
-                    slot(0).active = ev.value == 1
+    def emit_scroll(dv: float, dh: float) -> None:
+        scroll_acc[0] += dv
+        scroll_acc[1] += dh
+        iv = int(scroll_acc[0])
+        ih = int(scroll_acc[1])
+        if iv:
+            ui.write(ecodes.EV_REL, ecodes.REL_WHEEL, iv)
+            scroll_acc[0] -= iv
+        if ih:
+            ui.write(ecodes.EV_REL, ecodes.REL_HWHEEL, ih)
+            scroll_acc[1] -= ih
+        if iv or ih:
+            ui.syn()
 
-            elif ev.type == ecodes.EV_SYN and ev.code == ecodes.SYN_REPORT:
-                now = time.monotonic() * 1000.0
-                count = active_count()
+    # 포인터 누적기(서브픽셀 손실 방지)
+    ptr_acc = [0.0, 0.0]
 
-                # primary = 활성 slot 중 가장 작은 번호
-                primary = None
-                for i in sorted(slots):
-                    if slots[i].active:
-                        primary = slots[i]
-                        break
+    def emit_move(dx: float, dy: float) -> None:
+        ptr_acc[0] += dx
+        ptr_acc[1] += dy
+        ix = int(ptr_acc[0])
+        iy = int(ptr_acc[1])
+        if ix:
+            ui.write(ecodes.EV_REL, ecodes.REL_X, ix)
+            ptr_acc[0] -= ix
+        if iy:
+            ui.write(ecodes.EV_REL, ecodes.REL_Y, iy)
+            ptr_acc[1] -= iy
+        if ix or iy:
+            ui.syn()
 
-                if debug:
-                    print(f"count={count} primary={(primary.x, primary.y) if primary else None} "
-                          f"drag={dragging} left={left_down}")
+    # 제스처 상태
+    cur_slot = 0
+    last_primary = None
+    prev_count = 0
+    touch_down_ms = 0.0
+    touch_moved = 0.0
+    last_up_ms = 0.0
+    max_fingers = 0
+    dragging = False
+    left_down = False
 
-                # 이번 시퀀스에서 동시에 닿은 최대 손가락 수 갱신(우클릭 판정용)
-                if count > max_fingers:
-                    max_fingers = count
+    # 관성 스크롤 상태 (단위: units/sec)
+    scroll_vel = [0.0, 0.0]    # 최근 2손가락 이동으로 추정한 속도
+    last_scroll_ms = 0.0
+    inertia = [0.0, 0.0]       # 진행 중인 관성 속도
 
-                # --- 손가락이 처음 닿음 ---
-                if count > 0 and prev_finger_count == 0 and primary is not None:
-                    touch_down_ms = now
-                    touch_moved = 0.0
-                    max_fingers = count
-                    last_primary = (primary.x, primary.y)
-                    # 직전 탭 후 곧바로 다시 눌렀으면 드래그 개시
-                    if now - last_up_ms <= DRAG_START_MS:
-                        dragging = True
-                        left_down = True
-                        ui.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 1)
-                        ui.syn()
+    def process_syn(now: float) -> None:
+        nonlocal last_primary, prev_count, touch_down_ms, touch_moved
+        nonlocal last_up_ms, max_fingers, dragging, left_down, last_scroll_ms
+        count = active_count()
 
-                # --- 이동 처리 ---
-                elif count >= 1 and primary is not None and last_primary is not None:
-                    dx = primary.x - last_primary[0]
-                    dy = primary.y - last_primary[1]
-                    last_primary = (primary.x, primary.y)
-                    touch_moved += (dx * dx + dy * dy) ** 0.5
+        primary = None
+        for i in sorted(slots):
+            if slots[i].active:
+                primary = slots[i]
+                break
 
-                    if count == 1:
-                        mx = int(dx * POINTER_SPEED)
-                        my = int(dy * POINTER_SPEED)
-                        if mx:
-                            ui.write(ecodes.EV_REL, ecodes.REL_X, mx)
-                        if my:
-                            ui.write(ecodes.EV_REL, ecodes.REL_Y, my)
-                        if mx or my:
-                            ui.syn()
-                    elif count >= 2:
-                        # 2손가락: 스크롤. 세로 우선.
-                        sv = int(-dy * SCROLL_SPEED)
-                        sh = int(dx * SCROLL_SPEED)
-                        if sv:
-                            ui.write(ecodes.EV_REL, ecodes.REL_WHEEL, sv)
-                        if sh:
-                            ui.write(ecodes.EV_REL, ecodes.REL_HWHEEL, sh)
-                        if sv or sh:
-                            ui.syn()
+        if debug:
+            pos = (primary.x, primary.y) if primary else None
+            print(f"count={count} primary={pos} drag={dragging} "
+                  f"inertia={inertia[0]:.1f}")
 
-                # --- 모든 손가락 뗌 ---
-                if count == 0 and prev_finger_count > 0:
-                    if dragging or left_down:
-                        ui.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 0)
-                        ui.syn()
-                        dragging = False
-                        left_down = False
+        if count > max_fingers:
+            max_fingers = count
+
+        # 손가락 처음 닿음 -> 관성 취소 + 상태 초기화
+        if count > 0 and prev_count == 0 and primary is not None:
+            inertia[0] = inertia[1] = 0.0
+            scroll_vel[0] = scroll_vel[1] = 0.0
+            touch_down_ms = now
+            touch_moved = 0.0
+            max_fingers = count
+            last_primary = (primary.x, primary.y)
+            if now - last_up_ms <= DRAG_START_MS:
+                dragging = True
+                left_down = True
+                ui.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 1)
+                ui.syn()
+
+        # 이동 처리
+        elif count >= 1 and primary is not None and last_primary is not None:
+            dx = primary.x - last_primary[0]
+            dy = primary.y - last_primary[1]
+            last_primary = (primary.x, primary.y)
+            touch_moved += (dx * dx + dy * dy) ** 0.5
+
+            if count == 1:
+                emit_move(dx * POINTER_SPEED, dy * POINTER_SPEED)
+            elif count >= 2:
+                dv = dy * SCROLL_SPEED   # 세로 스크롤 방향(부호 뒤집어 조정)
+                dh = dx * SCROLL_SPEED
+                emit_scroll(dv, dh)
+                dt = (now - last_scroll_ms) / 1000.0
+                if dt > 0:
+                    scroll_vel[0] = 0.6 * scroll_vel[0] + 0.4 * (dv / dt)
+                    scroll_vel[1] = 0.6 * scroll_vel[1] + 0.4 * (dh / dt)
+            last_scroll_ms = now
+
+        # 모든 손가락 뗌
+        if count == 0 and prev_count > 0:
+            if dragging or left_down:
+                ui.write(ecodes.EV_KEY, ecodes.BTN_LEFT, 0)
+                ui.syn()
+                dragging = False
+                left_down = False
+            else:
+                held = now - touch_down_ms
+                if held <= TAP_MAX_MS and touch_moved <= TAP_SLOP_PX:
+                    # 1손가락 탭 -> 좌클릭, 2손가락 탭 -> 우클릭
+                    if max_fingers >= 2:
+                        emit_click(ecodes.BTN_RIGHT)
                     else:
-                        # 탭 판정: 짧고 거의 안 움직였으면 클릭
-                        #   1손가락 탭 -> 좌클릭,  2손가락 탭 -> 우클릭
-                        held = now - touch_down_ms
-                        if held <= TAP_MAX_MS and touch_moved <= TAP_SLOP_PX:
-                            if max_fingers >= 2:
-                                emit_click(ecodes.BTN_RIGHT)
-                            else:
-                                emit_click(ecodes.BTN_LEFT)
-                                last_up_ms = now
-                    max_fingers = 0
-                    last_primary = None
-                    # 뗀 slot 정리
-                    for s in slots.values():
-                        s.active = False
+                        emit_click(ecodes.BTN_LEFT)
+                        last_up_ms = now
+                elif max_fingers >= 2 and SCROLL_INERTIA:
+                    # 2손가락 스크롤 후 놓음 -> 관성 시작
+                    inertia[0] = scroll_vel[0]
+                    inertia[1] = scroll_vel[1]
+            max_fingers = 0
+            last_primary = None
+            for s in slots.values():
+                s.active = False
 
-                prev_finger_count = count
+        prev_count = count
 
+    def handle_event(ev) -> None:
+        nonlocal cur_slot
+        if ev.type == ecodes.EV_ABS:
+            if ev.code == ecodes.ABS_MT_SLOT:
+                cur_slot = ev.value
+            elif ev.code == ecodes.ABS_MT_TRACKING_ID:
+                slot(cur_slot).active = ev.value != -1
+            elif ev.code == ecodes.ABS_MT_POSITION_X:
+                slot(cur_slot).x = ev.value
+            elif ev.code == ecodes.ABS_MT_POSITION_Y:
+                slot(cur_slot).y = ev.value
+            elif ev.code == ecodes.ABS_X:
+                slot(0).x = ev.value
+            elif ev.code == ecodes.ABS_Y:
+                slot(0).y = ev.value
+        elif ev.type == ecodes.EV_KEY and ev.code == ecodes.BTN_TOUCH:
+            if not slots or list(slots.keys()) == [0]:
+                slot(0).active = ev.value == 1
+        elif ev.type == ecodes.EV_SYN and ev.code == ecodes.SYN_REPORT:
+            process_syn(time.monotonic() * 1000.0)
+
+    fd = dev.fileno()
+    last_tick = time.monotonic()
+    try:
+        while True:
+            timeout = INERTIA_TICK if (inertia[0] or inertia[1]) else 1.0
+            r, _, _ = select.select([fd], [], [], timeout)
+            now_s = time.monotonic()
+            if r:
+                try:
+                    for ev in dev.read():
+                        handle_event(ev)
+                except BlockingIOError:
+                    pass
+            # 관성 스크롤 (손가락 없을 때만)
+            if active_count() == 0 and (inertia[0] or inertia[1]):
+                dt = now_s - last_tick
+                if dt > 0:
+                    emit_scroll(inertia[0] * dt, inertia[1] * dt)
+                    decay = SCROLL_FRICTION ** (dt / 0.016)
+                    inertia[0] *= decay
+                    inertia[1] *= decay
+                    if (inertia[0] ** 2 + inertia[1] ** 2) ** 0.5 < SCROLL_INERTIA_MIN:
+                        inertia[0] = inertia[1] = 0.0
+            last_tick = now_s
     except KeyboardInterrupt:
         pass
     finally:
