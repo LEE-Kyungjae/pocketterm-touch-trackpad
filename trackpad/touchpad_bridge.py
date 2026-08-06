@@ -137,6 +137,7 @@ def run(dev: InputDevice, debug: bool = False) -> None:
     touch_down_ms = 0.0
     touch_moved = 0.0              # 눌린 뒤 이동 누적 거리
     last_up_ms = 0.0              # 마지막으로 손 뗀 시각(드래그 판정용)
+    max_fingers = 0               # 이번 터치 시퀀스에서 동시에 닿은 최대 손가락 수
     dragging = False
     left_down = False
 
@@ -194,10 +195,15 @@ def run(dev: InputDevice, debug: bool = False) -> None:
                     print(f"count={count} primary={(primary.x, primary.y) if primary else None} "
                           f"drag={dragging} left={left_down}")
 
+                # 이번 시퀀스에서 동시에 닿은 최대 손가락 수 갱신(우클릭 판정용)
+                if count > max_fingers:
+                    max_fingers = count
+
                 # --- 손가락이 처음 닿음 ---
                 if count > 0 and prev_finger_count == 0 and primary is not None:
                     touch_down_ms = now
                     touch_moved = 0.0
+                    max_fingers = count
                     last_primary = (primary.x, primary.y)
                     # 직전 탭 후 곧바로 다시 눌렀으면 드래그 개시
                     if now - last_up_ms <= DRAG_START_MS:
@@ -241,11 +247,16 @@ def run(dev: InputDevice, debug: bool = False) -> None:
                         dragging = False
                         left_down = False
                     else:
-                        # 탭 판정: 짧고 거의 안 움직였으면 왼쪽 클릭
+                        # 탭 판정: 짧고 거의 안 움직였으면 클릭
+                        #   1손가락 탭 -> 좌클릭,  2손가락 탭 -> 우클릭
                         held = now - touch_down_ms
                         if held <= TAP_MAX_MS and touch_moved <= TAP_SLOP_PX:
-                            emit_click(ecodes.BTN_LEFT)
-                            last_up_ms = now
+                            if max_fingers >= 2:
+                                emit_click(ecodes.BTN_RIGHT)
+                            else:
+                                emit_click(ecodes.BTN_LEFT)
+                                last_up_ms = now
+                    max_fingers = 0
                     last_primary = None
                     # 뗀 slot 정리
                     for s in slots.values():
