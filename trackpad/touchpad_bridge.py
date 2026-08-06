@@ -186,6 +186,7 @@ def run(dev: InputDevice, debug: bool = False) -> None:
     # 제스처 상태
     cur_slot = 0
     last_primary = None
+    last_primary_slot = -1
     prev_count = 0
     touch_down_ms = 0.0
     touch_moved = 0.0
@@ -200,14 +201,16 @@ def run(dev: InputDevice, debug: bool = False) -> None:
     inertia = [0.0, 0.0]       # 진행 중인 관성 속도
 
     def process_syn(now: float) -> None:
-        nonlocal last_primary, prev_count, touch_down_ms, touch_moved
+        nonlocal last_primary, last_primary_slot, prev_count, touch_down_ms, touch_moved
         nonlocal last_up_ms, max_fingers, dragging, left_down, last_scroll_ms
         count = active_count()
 
         primary = None
+        primary_slot = -1
         for i in sorted(slots):
             if slots[i].active:
                 primary = slots[i]
+                primary_slot = i
                 break
 
         if debug:
@@ -226,6 +229,7 @@ def run(dev: InputDevice, debug: bool = False) -> None:
             touch_moved = 0.0
             max_fingers = count
             last_primary = (primary.x, primary.y)
+            last_primary_slot = primary_slot
             if now - last_up_ms <= DRAG_START_MS:
                 dragging = True
                 left_down = True
@@ -234,21 +238,28 @@ def run(dev: InputDevice, debug: bool = False) -> None:
 
         # 이동 처리
         elif count >= 1 and primary is not None and last_primary is not None:
-            dx = primary.x - last_primary[0]
-            dy = primary.y - last_primary[1]
-            last_primary = (primary.x, primary.y)
-            touch_moved += (dx * dx + dy * dy) ** 0.5
+            # 손가락 개수나 주 손가락(primary)이 바뀐 프레임에는 이동을 내보내지
+            # 않는다. 안 그러면 두 손가락 중 하나(특히 기준 손가락)가 먼저 떨어질 때
+            # 남은 손가락과의 좌표 차이만큼 커서가 튄다.
+            if count != prev_count or primary_slot != last_primary_slot:
+                last_primary = (primary.x, primary.y)
+                last_primary_slot = primary_slot
+            else:
+                dx = primary.x - last_primary[0]
+                dy = primary.y - last_primary[1]
+                last_primary = (primary.x, primary.y)
+                touch_moved += (dx * dx + dy * dy) ** 0.5
 
-            if count == 1:
-                emit_move(dx * POINTER_SPEED, dy * POINTER_SPEED)
-            elif count >= 2:
-                dv = dy * SCROLL_SPEED   # 세로 스크롤 방향(부호 뒤집어 조정)
-                dh = dx * SCROLL_SPEED
-                emit_scroll(dv, dh)
-                dt = (now - last_scroll_ms) / 1000.0
-                if dt > 0:
-                    scroll_vel[0] = 0.6 * scroll_vel[0] + 0.4 * (dv / dt)
-                    scroll_vel[1] = 0.6 * scroll_vel[1] + 0.4 * (dh / dt)
+                if count == 1:
+                    emit_move(dx * POINTER_SPEED, dy * POINTER_SPEED)
+                elif count >= 2:
+                    dv = dy * SCROLL_SPEED   # 세로 스크롤 방향(부호 뒤집어 조정)
+                    dh = dx * SCROLL_SPEED
+                    emit_scroll(dv, dh)
+                    dt = (now - last_scroll_ms) / 1000.0
+                    if dt > 0:
+                        scroll_vel[0] = 0.6 * scroll_vel[0] + 0.4 * (dv / dt)
+                        scroll_vel[1] = 0.6 * scroll_vel[1] + 0.4 * (dh / dt)
             last_scroll_ms = now
 
         # 모든 손가락 뗌
@@ -273,6 +284,7 @@ def run(dev: InputDevice, debug: bool = False) -> None:
                     inertia[1] = scroll_vel[1]
             max_fingers = 0
             last_primary = None
+            last_primary_slot = -1
             for s in slots.values():
                 s.active = False
 
