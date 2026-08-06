@@ -1,0 +1,16 @@
+[Unit]
+Description=PocketTerm 35 touchscreen-to-trackpad bridge
+After=multi-user.target
+
+[Service]
+Type=simple
+# install-trackpad.sh 가 실제 경로로 치환한다.
+ExecStart=/usr/bin/python3 /opt/pocketterm35/touchpad_bridge.py
+Restart=on-failure
+RestartSec=2
+# uinput/input 접근을 위해 root 로 실행(가장 단순). 권한을 좁히려면
+# input/uinput 그룹 + udev 규칙으로 바꿀 수 있다(README 참고).
+User=root
+
+[Install]
+WantedBy=multi-user.target

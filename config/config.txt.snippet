@@ -1,0 +1,14 @@
+# =====================================================================
+# PocketTerm 35 — Waveshare 3.5" DPI 디스플레이 설정
+# 대상 파일: /boot/firmware/config.txt  (Ubuntu on Raspberry Pi 5)
+# 아래 줄들이 config.txt 의 [all] 섹션에 존재해야 한다.
+# provision.sh 가 자동으로 idempotent 하게 넣어준다. 수동으로 넣어도 됨.
+# =====================================================================
+
+[all]
+# I2C (터치 컨트롤러 gt911/ft6236 가 붙는 버스)
+dtparam=i2c_arm=on
+
+# Waveshare 3.5" DPI 디스플레이 + 터치 오버레이
+# 실제 오버레이 파일: /boot/firmware/current/overlays/waveshare-35dpi-5b.dtbo
+dtoverlay=waveshare-35dpi-5b
