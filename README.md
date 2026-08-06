@@ -1,7 +1,13 @@
-# PocketTerm 35
+# PocketTerm 35 — Touchscreen → Trackpad
 
-라즈베리파이 5 + Waveshare 3.5" DPI 터치 디스플레이로 만든 포켓 터미널(**PocketTerm 35**)의
-셋업 매뉴얼과 프로비저닝 도구.
+**포켓텀(PocketTerm 35)의 터치스크린을 노트북 트랙패드처럼 바꿔주는 도구** +
+라즈베리파이 5 / Waveshare 3.5" 디스플레이·터치 셋업 복구 매뉴얼.
+
+> **Turn a Raspberry Pi touchscreen into a laptop-style trackpad** (Linux `evdev` → `uinput`):
+> relative pointer, tap-to-click, two-finger tap right-click, two-finger scroll with
+> inertia/momentum, and tap-drag. Runs as a systemd service.
+
+`raspberry-pi` · `touchscreen` · `trackpad` · `touchpad` · `evdev` · `uinput` · `goodix` · `waveshare`
 
 이 저장소의 목적은 두 가지다:
 
@@ -12,7 +18,7 @@
 > ⚠️ **정직성 노트**
 > 이 저장소의 값들은 실제 기기(Raspberry Pi 5 Model B, Ubuntu)에서 확인한 것과,
 > 표준 절차로 채운 것이 섞여 있다. 각 문서에 `✅ 확인됨` / `ℹ️ 표준절차(미검증)` 로 표시했다.
-> 트랙패드 스크립트는 작성 시점에 실제 하드웨어에서 최종 검증되지 않았다(아래 4번 참고).
+> 트랙패드는 실기기(Pi 5 / Goodix 터치)에서 동작 확인 완료 — 아래 4번 참고.
 
 ---
 
@@ -38,8 +44,8 @@
 파이에 SSH로 들어간 뒤:
 
 ```bash
-git clone <이-저장소-URL> pocketterm35
-cd pocketterm35
+git clone <이-저장소-URL> pocketterm-touch-trackpad
+cd pocketterm-touch-trackpad
 
 # 디스플레이 오버레이만 복구
 sudo ./scripts/provision.sh
@@ -71,7 +77,7 @@ sudo reboot
 ## 저장소 구조
 
 ```
-pocketterm35/
+pocketterm-touch-trackpad/
 ├── README.md
 ├── overlays/waveshare-35dpi-5b.dtbo     # 실제 오버레이 바이너리 (md5 ec0dae46…)
 ├── config/config.txt.snippet            # config.txt 에 필요한 줄
@@ -85,19 +91,22 @@ pocketterm35/
 └── docs/…
 ```
 
-## 4. 트랙패드 검증 상태 (읽어라)
+## 4. 트랙패드 검증 상태
 
-`touchpad_bridge.py` 는 goodix gt911 / ft6236 계열(멀티터치 Type B + BTN_TOUCH)을
-기준으로 작성했고, 로컬에서 문법·구조는 검증했지만 **실제 이 기기 터치 위에서의 동작은
-아직 확인하지 못했다**(작성 시점 SSH 접근 제약). 첫 실행은 서비스로 걸기 전에
-포그라운드 + `--debug` 로 확인하는 걸 권장한다:
+실기기(Raspberry Pi 5, `Goodix Capacitive TouchScreen` = `/dev/input/event9`)에서 **확인 완료** ✅
+- 터치 자동탐지 → grab → 가상 트랙패드 생성
+- 1손가락 커서 이동 · 1손가락 탭 좌클릭 · 2손가락 탭 우클릭
+- 2손가락 스크롤 + 관성(momentum) · 탭-드래그
+- systemd 서비스로 상시 실행(부팅 자동)
+
+동작을 직접 관찰(튜닝용):
 
 ```bash
 sudo python3 trackpad/touchpad_bridge.py --list      # 터치 장치 확인
-sudo python3 trackpad/touchpad_bridge.py --debug     # 손으로 만져보며 관찰
+sudo python3 trackpad/touchpad_bridge.py --debug     # 손으로 만져보며 이벤트 관찰
 ```
 
-이상하면 [docs/04-trackpad.md](docs/04-trackpad.md) 의 튜닝 상수 조정.
+세기·방향 조정은 [docs/04-trackpad.md](docs/04-trackpad.md) 의 튜닝 상수 참고.
 
 ## 라이선스
 
